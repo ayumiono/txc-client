@@ -1,0 +1,469 @@
+package com.gb.dbsync.client.model.txc;
+
+import java.sql.SQLException;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+
+import org.springframework.jdbc.core.JdbcTemplate;
+
+import com.alibaba.druid.sql.ast.SQLExpr;
+import com.alibaba.druid.sql.ast.SQLStatement;
+import com.alibaba.druid.sql.ast.expr.SQLAllColumnExpr;
+import com.alibaba.druid.sql.ast.expr.SQLBinaryOpExpr;
+import com.alibaba.druid.sql.ast.expr.SQLBinaryOperator;
+import com.alibaba.druid.sql.ast.expr.SQLIdentifierExpr;
+import com.alibaba.druid.sql.ast.expr.SQLLiteralExpr;
+import com.alibaba.druid.sql.ast.expr.SQLMethodInvokeExpr;
+import com.alibaba.druid.sql.ast.expr.SQLNumericLiteralExpr;
+import com.alibaba.druid.sql.ast.expr.SQLPropertyExpr;
+import com.alibaba.druid.sql.ast.expr.SQLVariantRefExpr;
+import com.alibaba.druid.sql.ast.statement.SQLDeleteStatement;
+import com.alibaba.druid.sql.ast.statement.SQLExprTableSource;
+import com.alibaba.druid.sql.ast.statement.SQLInsertStatement;
+import com.alibaba.druid.sql.ast.statement.SQLInsertStatement.ValuesClause;
+import com.alibaba.druid.sql.ast.statement.SQLSelectItem;
+import com.alibaba.druid.sql.ast.statement.SQLSelectQueryBlock;
+import com.alibaba.druid.sql.ast.statement.SQLUpdateSetItem;
+import com.alibaba.druid.sql.builder.SQLSelectBuilder;
+import com.alibaba.druid.sql.builder.impl.SQLDeleteBuilderImpl;
+import com.alibaba.druid.sql.builder.impl.SQLSelectBuilderImpl;
+import com.alibaba.druid.sql.builder.impl.SQLUpdateBuilderImpl;
+import com.alibaba.druid.sql.dialect.mysql.ast.statement.MySqlInsertStatement;
+import com.alibaba.druid.sql.dialect.mysql.ast.statement.MySqlUpdateStatement;
+import com.alibaba.druid.util.JdbcUtils;
+import com.gb.dbsync.client.exception.TxcSqlParseException;
+import com.gb.dbsync.client.model.SQLType;
+import com.gb.dbsync.client.model.TableSchema;
+import com.gb.dbsync.client.service.TableSchemaCacheLoader;
+import com.gb.dbsync.client.sqlast.MySQLRewriteVistorAop;
+import com.gb.dbsync.client.sqlast.SQLASTVisitorAspectAdapter;
+import com.gb.dbsync.client.sqlast.SqlInsertStatementBuilderImpl;
+import com.gb.dbsync.client.utils.LRUCache;
+import com.mysql.jdbc.Field;
+
+public class TxcSqlParserProcessor_old {
+	
+	SQLStatement statement;
+	SQLUpdateBuilderImpl updateBuilder;
+	SQLSelectBuilder queryBuilder;
+	SQLDeleteBuilderImpl deleteBuilder;
+	SqlInsertStatementBuilderImpl insertStatementBuilder;
+	SQLParamExtractorPipeline pipeline;
+	String tableName;
+	
+	JdbcTemplate jdbcTemplate;
+	
+	public SQLParamExtractorPipeline getRenderPipeline() {
+		return pipeline;
+	}
+	
+	public TxcSqlParserProcessor_old(JdbcTemplate jdbcTemplate, SQLStatement statement){
+		this.jdbcTemplate = jdbcTemplate;
+		this.statement = statement;
+	}
+	
+	public TxcSqlTransformResult parse() {
+		TxcSqlTransformResult result = new TxcSqlTransformResult();
+		queryBuilder = new SQLSelectBuilderImpl(JdbcUtils.MYSQL);
+		if (statement instanceof MySqlUpdateStatement) {// update
+			updateBuilder = new SQLUpdateBuilderImpl(JdbcUtils.MYSQL);
+			result.rollbackSql = updateBuilder.getSQLUpdateStatement();
+			result.sqlType = SQLType.UPDATE;
+		} else if (statement instanceof MySqlInsertStatement) {// insert
+			deleteBuilder = new SQLDeleteBuilderImpl(JdbcUtils.MYSQL);
+			result.rollbackSql = deleteBuilder.getSQLDeleteStatement();
+			result.sqlType = SQLType.INSERT;
+		} else if(statement instanceof SQLDeleteStatement ){// delete
+			insertStatementBuilder = new SqlInsertStatementBuilderImpl(JdbcUtils.MYSQL);
+			result.rollbackSql = insertStatementBuilder.getSQLInsertStatement();
+			result.sqlType = SQLType.DELETE;
+		}
+		pipeline = new SQLParamExtractorPipeline();
+		statement.accept(new MySQLRewriteVistorAop(new TxcSQLASTVisitorAdivce()));
+		result.pipeline = pipeline;
+		result.querySql = queryBuilder.getSQLSelectStatement();
+		result.tableName = tableName;
+		result.where = null;//FIXME
+		return result;
+	}
+
+	class TxcSQLASTVisitorAdivce extends SQLASTVisitorAspectAdapter {
+		
+		int index = 0;//下标重排
+		
+		boolean containPrimaryKey = true;//默认不额外处理主键
+		TableSchema schema;
+		
+		boolean visitWhereAlone = false;//默认走正常处理流程
+		Set<String> parsedPrimaryKey;
+		
+		/* (non-Javadoc)
+		 * @see com.gb.dbsync.client.sqlast.SQLASTVisitorAspectAdapter#tableAspect(com.alibaba.druid.sql.ast.statement.SQLExprTableSource)
+		 * 解析table名
+		 */
+		@Override
+		public SQLExprTableSource tableAspect(SQLExprTableSource table) {
+			SQLIdentifierExpr tableName = (SQLIdentifierExpr) table.getExpr();
+			queryBuilder.from(tableName.getName());
+			if(updateBuilder != null) {
+				updateBuilder.from(tableName.getName());
+			}
+			if(deleteBuilder != null) {
+				deleteBuilder.from(tableName.getName());
+			}
+			if(insertStatementBuilder != null) {
+				insertStatementBuilder.insert(tableName.getName());
+			}
+			TxcSqlParserProcessor_old.this.tableName = tableName.getName();
+			TableSchema schema = LRUCache.getTableSchema(tableName.getName(),new TableSchemaCacheLoader(jdbcTemplate, tableName.getName()));
+			this.schema = schema;
+			if(statement instanceof MySqlUpdateStatement) {
+				visitWhereAlone = true;//标记一下现在正在单独处理where
+				parsedPrimaryKey = new HashSet<>();
+				((MySqlUpdateStatement) statement).getWhere().accept(new MySQLRewriteVistorAop(this));//这里单独解析where条件部分，看条件中是否包含主键
+				visitWhereAlone = false;//标记一下现在是正常的解析流程
+				if(parsedPrimaryKey.containsAll(schema.getPrimaryKeyStrs())) {//条件中包含所有主键字段，最理相的情况，update时不需要增加额外主键条件
+					containPrimaryKey = true;
+				}else {
+					containPrimaryKey = false;
+				}
+			}
+			return table;
+		}
+		
+		@Override
+		public void deleteEnterPoint(SQLDeleteStatement deleteStatement) {
+			List<Field> columns = schema.getFields();
+			String[] cs = new String[columns.size()];
+			for(int i = 0;i < columns.size();i++) {
+				try {
+					final int idex = i;
+					final String cname = columns.get(i).getName();
+					cs[i] = cname;
+					pipeline.addExtractor(new SQLParamExtractorPipeline.UpdateSetItemExtractor(pipeline) {
+						
+						@Override
+						public void extract() {
+							Object value = this.getQueryColumn(cname);
+							this.addFinalArg(idex,value);
+						}
+						
+						@Override
+						public String desc() {
+							return String.format("【DELETE】从原数据中抽取列【%s】的值", cname);
+						}
+					});
+				} catch (SQLException e) {
+					e.printStackTrace();
+				}
+				index++;//让where条件下标后移
+			}
+			insertStatementBuilder.column(cs);
+			SQLSelectQueryBlock query =  (SQLSelectQueryBlock) queryBuilder.getSQLSelectStatement().getSelect().getQuery();
+			SQLSelectItem selectItem = new SQLSelectItem(new SQLAllColumnExpr());
+			query.addSelectItem(selectItem);
+			
+		}
+		
+		/* (non-Javadoc)
+		 * @see com.gb.dbsync.client.sqlast.SQLASTVisitorAspectAdapter#insertEnterPoint(com.alibaba.druid.sql.ast.statement.SQLInsertStatement)
+		 * insert语句解析成delete,抽取主键值
+		 */
+		@Override
+		public void insertEnterPoint(SQLInsertStatement insertStatement) {
+			List<SQLExpr> columns = insertStatement.getColumns();
+			int i = 0;
+			boolean existPrimaryKey = false;
+			SQLExpr where = null;
+			for(SQLExpr column : columns) {
+				SQLIdentifierExpr _column = (SQLIdentifierExpr) column;
+				queryBuilder.select(_column.getName());
+				if(schema.getPrimaryKeyStrs().contains(_column.getName())) {
+					ValuesClause values = insertStatement.getValues();
+					List<SQLExpr> _values = values.getValues();
+					SQLVariantRefExpr right = new SQLVariantRefExpr("?");
+					right.setIndex(index);
+					final int tmpIndex = index;
+					index++;
+					if(_values.get(i) instanceof SQLVariantRefExpr) {
+						SQLVariantRefExpr primaryKeyVariantRef = (SQLVariantRefExpr) _values.get(i);
+						int _index = primaryKeyVariantRef.getIndex();
+						pipeline.addExtractor(new SQLParamExtractorPipeline.OriginalParamExtractor(pipeline) {
+							
+							@Override
+							public void extract() {
+								Object[] args = (Object[]) context.getParam(SQLParamExtractorPipeline.OUTTER_ARGS);
+								Object value = args[_index];
+								this.addFinalArg(tmpIndex, value);
+//								this.addWhereArg(value);
+							}
+							
+							@Override
+							public String desc() {
+								return String.format("【INSERT】从原始参数中提取主键值,下标为%d", _index);
+							}
+						});
+					} else if(_values.get(i) instanceof SQLLiteralExpr) {
+						final String primaryKeyValue = _values.get(i).toString();
+						pipeline.addExtractor(new SQLParamExtractorPipeline.OriginalParamExtractor(pipeline) {
+							
+							@Override
+							public void extract() {
+								this.addFinalArg(tmpIndex, primaryKeyValue);
+//								this.addWhereArg(value);
+							}
+							
+							@Override
+							public String desc() {
+								return String.format("【INSERT】从原始SQL中提取主键值:%s", primaryKeyValue);
+							}
+						});
+					} else {
+						throw new TxcSqlParseException("insert statement中包含不支持的参数类型，目前仅支持占位符和一般的SqlLiteralExpr参数类型");
+					}
+					if(where != null) {
+						SQLExpr andRight = new SQLBinaryOpExpr(new SQLIdentifierExpr(_column.getName()), SQLBinaryOperator.Equality, right);
+						where = new SQLBinaryOpExpr(where, SQLBinaryOperator.BooleanAnd, andRight);
+					}else {
+						where = new SQLBinaryOpExpr(new SQLIdentifierExpr(_column.getName()), SQLBinaryOperator.Equality, right);
+					}
+					
+					deleteBuilder.getSQLDeleteStatement().setWhere(where);//只带一个主键条件
+					
+					SQLSelectQueryBlock query = (SQLSelectQueryBlock) queryBuilder.getSQLSelectStatement().getSelect().getQuery();
+					query.setWhere(where);
+					existPrimaryKey = true;
+				}
+				i++;
+			}
+			if(!existPrimaryKey) {//如果insert字段里不包含主键字段，则报错，不支持sql回滚
+				throw new TxcSqlParseException("insert statement中没有包含主键！");
+			}
+		}
+		
+		/* (non-Javadoc)
+		 * @see com.gb.dbsync.client.sqlast.SQLASTVisitorAspectAdapter#updateItemAspect(com.alibaba.druid.sql.ast.statement.SQLUpdateSetItem)
+		 * update set部分
+		 */
+		@Override
+		public SQLUpdateSetItem updateItemAspect(SQLUpdateSetItem updateItem) {
+			
+			SQLUpdateSetItem newItem = new SQLUpdateSetItem();
+			newItem.setColumn(updateItem.getColumn());
+			
+			SQLExpr column = updateItem.getColumn();
+			final String columnName;
+			if(column instanceof SQLPropertyExpr) {
+				columnName = ((SQLPropertyExpr) column).getName();
+			}else if(column instanceof SQLIdentifierExpr) {
+				columnName = ((SQLIdentifierExpr) column).getName();
+			}else {
+				columnName = null;
+			}
+			
+			if(columnName != null) {
+				queryBuilder.select(columnName);
+			}
+			
+			SQLExpr value = updateItem.getValue();
+			SQLExpr newValue = null;
+			if(value instanceof SQLVariantRefExpr || value instanceof SQLLiteralExpr || value instanceof SQLMethodInvokeExpr) {//column1 = ?; column1 = 1; column1 = now()
+				SQLVariantRefExpr tmp = new SQLVariantRefExpr();
+				tmp.setName("?");
+				tmp.setParent(newItem);
+				tmp.setIndex(index);
+				final int tmpIndex = index;
+				pipeline.addExtractor(new SQLParamExtractorPipeline.UpdateSetItemExtractor(pipeline) {
+					@Override
+					public void extract() {
+						Object value = this.getQueryColumn(columnName);
+						this.addFinalArg(tmpIndex,value);
+					}
+					
+					@Override
+					public String desc() {
+						return String.format("【UPDATE】从原数据中获取列【%s】的值", columnName);
+					}
+				});
+				index ++;
+				newValue = tmp;
+			}else if(value instanceof SQLBinaryOpExpr) {
+				//column1 = column1 + 1;column1 = column2 + 1;column1 = column1 + column2;t.column1 = t.column1 + 1;
+				SQLBinaryOpExpr op = (SQLBinaryOpExpr) value;
+				if((
+						(op.getLeft() instanceof SQLIdentifierExpr && ((SQLIdentifierExpr) op.getLeft()).getName().equals(columnName)) || 
+						(op.getLeft() instanceof SQLPropertyExpr && ((SQLPropertyExpr) op.getLeft()).getName().equals(columnName))
+					) && 
+					( 
+						op.getRight() instanceof SQLNumericLiteralExpr || op.getRight() instanceof SQLVariantRefExpr
+					)) {
+					SQLBinaryOpExpr newOp = new SQLBinaryOpExpr();
+					newOp.setLeft(op.getLeft());//left 延用
+					SQLBinaryOperator operator = op.getOperator();//op	如果是+、-操作则取反
+					if(operator == SQLBinaryOperator.Add) {
+						newOp.setOperator(SQLBinaryOperator.Subtract);
+					}else if(operator == SQLBinaryOperator.Subtract) {
+						newOp.setOperator(SQLBinaryOperator.Add);
+					}
+					if(op.getRight() instanceof SQLVariantRefExpr) {
+						SQLVariantRefExpr _v = new SQLVariantRefExpr();
+						_v.setName("?");
+						_v.setParent(op);
+						_v.setIndex(index);
+						//right	包含占位符
+						final int tmpIndex = index;
+						pipeline.addExtractor(new SQLParamExtractorPipeline.OriginalParamExtractor(pipeline) {
+							@Override
+							public void extract() {
+								Object[] args = (Object[]) context.getParam(SQLParamExtractorPipeline.OUTTER_ARGS);
+								Object value = args[((SQLVariantRefExpr)op.getRight()).getIndex()];
+								this.addFinalArg(tmpIndex,value);
+							}
+							
+							@Override
+							public String desc() {
+								return String.format("【UPDATE】从原参数数组中获取下标【%d】的值", ((SQLVariantRefExpr)op.getRight()).getIndex());
+							}
+						});
+						index ++;
+					}else {
+						newOp.setRight(op.getRight());//right	直接取值
+					}
+					newValue = newOp;
+				}else {
+					SQLVariantRefExpr tmp = new SQLVariantRefExpr();
+					tmp.setName("?");
+					tmp.setParent(newItem);
+					tmp.setIndex(index);
+					final int tmpIndex = index;
+					pipeline.addExtractor(new SQLParamExtractorPipeline.UpdateSetItemExtractor(pipeline) {
+						@Override
+						public void extract() {
+							Object value = this.getQueryColumn(columnName);
+							this.addFinalArg(tmpIndex,value);
+						}
+						
+						@Override
+						public String desc() {
+							return String.format("【UPDATE】从原数据中获取列【%s】的值", columnName);
+						}
+					});
+					index ++;
+					newValue = tmp;
+				}
+			}
+			newItem.setValue(newValue);
+			updateBuilder.getSQLUpdateStatement().addItem(newItem);
+			return updateItem;
+		}
+		
+		@Override
+		public String whereColumnAspect(String columnName,SQLLiteralExpr right) {
+			if(visitWhereAlone) {
+				if(schema.getPrimaryKeyStrs().contains(columnName)) {
+					parsedPrimaryKey.add(columnName);
+				}
+				return columnName;
+			}
+			return columnName;
+		}
+		
+		/* (non-Javadoc)
+		 * @see com.gb.dbsync.client.sqlast.SQLASTVisitorAspectAdapter#whereColumnAspect(java.lang.String, com.alibaba.druid.sql.ast.expr.SQLVariantRefExpr)
+		 * 对where中的占位符重新定义下标
+		 */
+		@Override
+		public String whereColumnAspect(String columnName, SQLVariantRefExpr right) {
+			if(visitWhereAlone) {
+				if(schema.getPrimaryKeyStrs().contains(columnName)) {
+					parsedPrimaryKey.add(columnName);
+				}
+				return columnName;
+			}
+			final int oldIndex = right.getIndex();
+			right.setIndex(index);
+			final int tmpIndex = index;
+			pipeline.addExtractor(new SQLParamExtractorPipeline.OriginalParamExtractor(pipeline) {
+				@Override
+				public void extract() {
+					Object[] args = (Object[]) context.getParam(SQLParamExtractorPipeline.OUTTER_ARGS);
+					Object value = args[oldIndex];
+					this.addFinalArg(tmpIndex,value);//delete生成insert回滚时不需要where条件
+//					this.addWhereArg(value);
+				}
+				
+				@Override
+				public String desc() {
+					return String.format("【WHERE】从原参数数组中获取下标【%d】的值", oldIndex);
+				}
+			});
+//			pipeline.cacheQueryParamsIndex(oldIndex);
+			index++;
+			return columnName;
+		}
+
+		/* (non-Javadoc)
+		 * @see com.gb.dbsync.client.sqlast.SQLASTVisitorAspectAdapter#whereEnterPoint(com.alibaba.druid.sql.ast.expr.SQLBinaryOpExpr)
+		 * where解析比较复杂，延用原sql中的where结构
+		 */
+		@Override
+		public void whereEnterPoint(SQLBinaryOpExpr x) {
+			if(visitWhereAlone) {
+				return;
+			}
+			if(!visitWhereAlone && !containPrimaryKey) {//如果条件中没有主键条件 FIXME 这里还需要判断原语句中的主键条件操作是不是"="，如果不是，也需要补足
+				if(statement instanceof MySqlUpdateStatement) {
+					SQLBinaryOpExpr mkup = null;
+					//补足没有使用到的主键条件
+					for(String primaryKey : schema.getPrimaryKeyStrs()) {
+						if(! parsedPrimaryKey.contains(primaryKey)) {
+							queryBuilder.select(primaryKey);//额外查出主键值
+							SQLVariantRefExpr right = new SQLVariantRefExpr("?");
+							right.setIndex(index);
+							final int tmpIndex = index;
+							pipeline.addExtractor(new SQLParamExtractorPipeline.UpdateSetItemExtractor(pipeline) {
+
+								@Override
+								public void extract() {
+									Object value = this.getQueryColumn(primaryKey);
+									this.addFinalArg(tmpIndex,value);
+								}
+
+								@Override
+								public String desc() {
+									return String.format("【UPDATE】从原数据中补足主键条件%s", primaryKey);
+								}});
+							index ++;
+							if(mkup == null) {
+								mkup = new SQLBinaryOpExpr(new SQLIdentifierExpr(primaryKey), SQLBinaryOperator.Equality, right);
+								
+							}else {
+								mkup = new SQLBinaryOpExpr(mkup,SQLBinaryOperator.BooleanAnd,right);
+							}
+						}
+					}
+					if(mkup != null) {
+						mkup = new SQLBinaryOpExpr(mkup,SQLBinaryOperator.BooleanAnd,x);
+					}
+					updateBuilder.getSQLUpdateStatement().setWhere(mkup);
+					SQLSelectQueryBlock query =  (SQLSelectQueryBlock) queryBuilder.getSQLSelectStatement().getSelect().getQuery();
+					query.setWhere(x);
+					return;
+				}
+			}
+//			x.setParent(queryBuilder.getSQLSelectStatement());
+			SQLSelectQueryBlock query =  (SQLSelectQueryBlock) queryBuilder.getSQLSelectStatement().getSelect().getQuery();
+			query.setWhere(x);
+//			queryBuilder.where(SQLUtils.toSQLString(x, JdbcUtils.MYSQL));//query中的index打乱重新开始
+			
+			//为了保证where条件中的结构不被破坏，我们这里直接引用
+			if(updateBuilder != null) {
+				updateBuilder.getSQLUpdateStatement().setWhere(x);
+			}
+			if(deleteBuilder != null) {
+				deleteBuilder.getSQLDeleteStatement().setWhere(x);
+			}
+		}
+	}
+}
