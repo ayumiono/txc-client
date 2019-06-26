@@ -1,12 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
 	xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
 	<modelVersion>4.0.0</modelVersion>
-	<parent>
-		<groupId>com.gb.soa</groupId>
-		<artifactId>omp_cparent</artifactId>
-		<version>1.0-SNAPSHOT</version>
-		<relativePath>../omp_cparent</relativePath>
-	</parent>
 	<groupId>com.tranboot</groupId>
 	<artifactId>txc-client</artifactId>
 	<version>4.0.3-release</version>
@@ -61,55 +56,52 @@
 	</build>
 	<dependencies>
 		<dependency>
-			<groupId>com.google.guava</groupId>
-			<artifactId>guava</artifactId>
-			<scope>provided</scope>
-		</dependency>
-		<dependency>
-        <groupId>io.dropwizard.metrics</groupId>
-	        <artifactId>metrics-core</artifactId>
-	        <version>4.0.0</version>
-    	</dependency>
-    	<dependency>
-		    <groupId>io.dropwizard.metrics</groupId>
-		    <artifactId>metrics-jmx</artifactId>
-		    <version>4.0.0</version>
-		    <exclusions>
-		    	<exclusion>
-		    		<groupId>io.dropwizard.metrics</groupId>
-		    		<artifactId>metrics-core</artifactId>
-		    	</exclusion>
-		    </exclusions>
-		</dependency>
-		<dependency>
 			<groupId>junit</groupId>
 			<artifactId>junit</artifactId>
+			<version>4.12</version>
 			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>com.google.guava</groupId>
+			<artifactId>guava</artifactId>
+			<version>27.1-jre</version>
+		</dependency>
+		<dependency>
+			<groupId>io.dropwizard.metrics</groupId>
+			<artifactId>metrics-core</artifactId>
+			<version>4.0.0</version>
+		</dependency>
+		<dependency>
+			<groupId>io.dropwizard.metrics</groupId>
+			<artifactId>metrics-jmx</artifactId>
+			<version>4.0.0</version>
+			<exclusions>
+				<exclusion>
+					<groupId>io.dropwizard.metrics</groupId>
+					<artifactId>metrics-core</artifactId>
+				</exclusion>
+			</exclusions>
 		</dependency>
 		<dependency>
 			<groupId>org.springframework</groupId>
 			<artifactId>spring-jdbc</artifactId>
-			<scope>provided</scope>
+			<version>5.1.5.RELEASE</version>
 		</dependency>
-		<!-- <dependency>
-			<groupId>com.alibaba</groupId>
-    		<artifactId>druid</artifactId>
-			<scope>provided</scope>
-		</dependency> -->
 		<dependency>
 			<groupId>org.slf4j</groupId>
 			<artifactId>slf4j-api</artifactId>
-			<scope>provided</scope>
+			<version>1.7.25</version>
 		</dependency>
+
 		<dependency>
 			<groupId>org.apache.commons</groupId>
 			<artifactId>commons-lang3</artifactId>
-			<scope>provided</scope>
+			<version>3.8.1</version>
 		</dependency>
 		<dependency>
 			<groupId>org.springframework.data</groupId>
 			<artifactId>spring-data-redis</artifactId>
-			<scope>provided</scope>
+			<version>2.1.8.RELEASE</version>
 		</dependency>
 		<dependency>
 			<groupId>com.alibaba.rocketmq</groupId>
@@ -125,10 +117,12 @@
 					<artifactId>logback-core</artifactId>
 				</exclusion>
 			</exclusions>
+			<version>3.2.6</version>
 		</dependency>
 		<dependency>
 			<groupId>ch.qos.logback</groupId>
 			<artifactId>logback-classic</artifactId>
+			<version>1.2.3</version>
 			<scope>provided</scope>
 		</dependency>
 		<dependency>
@@ -139,16 +133,19 @@
 		<dependency>
 			<groupId>redis.clients</groupId>
 			<artifactId>jedis</artifactId>
+			<version>2.9.0</version>
 			<scope>provided</scope>
 		</dependency>
 		<dependency>
 			<groupId>mysql</groupId>
 			<artifactId>mysql-connector-java</artifactId>
+			<version>5.1.47</version>
 			<scope>provided</scope>
 		</dependency>
 		<dependency>
 			<groupId>com.fasterxml.jackson.core</groupId>
 			<artifactId>jackson-databind</artifactId>
+			<version>2.9.8</version>
 			<scope>provided</scope>
 		</dependency>
 		<dependency>
@@ -161,28 +158,24 @@
 			<artifactId>aviator</artifactId>
 			<version>2.2.1</version>
 		</dependency>
-		<dependency>
-			<groupId>com.gb.soa</groupId>
-			<artifactId>dbsync_server_api</artifactId>
-			<!-- <optional>true</optional> -->
-			<version>1.0-SNAPSHOT</version>
-		</dependency>
+		<!-- <dependency> <groupId>com.gb.soa</groupId> <artifactId>dbsync_server_api</artifactId> 
+			<optional>true</optional> <version>1.0-SNAPSHOT</version> </dependency> -->
 		<dependency>
 			<groupId>com.gb.soa</groupId>
 			<artifactId>distributed_transaction_api</artifactId>
-			<!-- <optional>true</optional> -->
-			<version>1.0-SNAPSHOT</version>
+			<optional>true</optional>
+			<version>1.0.0</version>
 		</dependency>
 		<dependency>
 			<groupId>com.alibaba</groupId>
 			<artifactId>dubbo</artifactId>
-			<version>${dubbo.version}</version>
 			<exclusions>
 				<exclusion>
 					<groupId>org.springframework</groupId>
 					<artifactId>spring</artifactId>
 				</exclusion>
 			</exclusions>
+			<version>2.6.6</version>
 			<scope>provided</scope>
 		</dependency>
 	</dependencies>
